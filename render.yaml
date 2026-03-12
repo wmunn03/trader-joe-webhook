@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: trader-joe-webhook
+    env: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: OANDA_API_KEY
+        sync: false          # set manually in Render dashboard
+      - key: OANDA_ACCOUNT_ID
+        sync: false
+      - key: WEBHOOK_SECRET
+        sync: false          # you choose this — paste same value into TradingView alert
+      - key: BASE44_WEBHOOK_URL
+        sync: false          # optional — for agent notifications
+    healthCheckPath: /
