@@ -1,7 +1,10 @@
 /**
  * Trader Joe — FX Webhook Execution Server
  * + Auto-Poller: checks Base44 TradeSetup entity every 5 minutes
- *   via Base44 backend functions — no TradingView needed.
+ *   via Base44 backend functions.
+ *
+ * MAX_CONCURRENT_TRADES = 2
+ * Each trade risks 1% of account balance.
  */
 
 const express = require('express');
@@ -10,31 +13,30 @@ const app     = express();
 app.use(express.json());
 
 // ── Config ────────────────────────────────────────────────────────────────────
-const OANDA_API_KEY    = process.env.OANDA_API_KEY;
-const OANDA_ACCOUNT_ID = process.env.OANDA_ACCOUNT_ID;
-const WEBHOOK_SECRET   = process.env.WEBHOOK_SECRET;
+const OANDA_API_KEY        = process.env.OANDA_API_KEY;
+const OANDA_ACCOUNT_ID     = process.env.OANDA_ACCOUNT_ID;
+const WEBHOOK_SECRET       = process.env.WEBHOOK_SECRET;
 const BASE44_SERVICE_TOKEN = process.env.BASE44_SERVICE_TOKEN;
 
-// Base44 backend function URLs (correct endpoints)
-const BASE44_GET_TRADES_URL    = 'https://trader-joe-4634b4f9.base44.app/functions/getPendingTrades';
-const BASE44_UPDATE_TRADE_URL  = 'https://trader-joe-4634b4f9.base44.app/functions/updateTradeStatus';
+const BASE44_GET_TRADES_URL   = 'https://trader-joe-4634b4f9.base44.app/functions/getPendingTrades';
+const BASE44_UPDATE_TRADE_URL = 'https://trader-joe-4634b4f9.base44.app/functions/updateTradeStatus';
 
-const OANDA_BASE       = 'https://api-fxpractice.oanda.com/v3';
-const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const OANDA_BASE          = 'https://api-fxpractice.oanda.com/v3';
+const POLL_INTERVAL_MS    = 5 * 60 * 1000; // 5 minutes
+const MAX_CONCURRENT_TRADES = 2;            // ← Max open trades at any time
+const RISK_PER_TRADE_PCT  = 0.01;           // 1% per trade
 
 // ── Instrument map ────────────────────────────────────────────────────────────
 const INSTRUMENT_MAP = {
-  'EURUSD': 'EUR_USD',
+  'EURUSD':  'EUR_USD',
   'EUR_USD': 'EUR_USD',
-  'GBPUSD': 'GBP_USD',
+  'GBPUSD':  'GBP_USD',
   'GBP_USD': 'GBP_USD',
-  'AUDUSD': 'AUD_USD',
+  'AUDUSD':  'AUD_USD',
   'AUD_USD': 'AUD_USD',
-  'USDJPY': 'USD_JPY',
+  'USDJPY':  'USD_JPY',
   'USD_JPY': 'USD_JPY',
 };
-
-const RISK_PER_TRADE_PCT = 0.01; // 1% account risk
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/', (req, res) => {
@@ -71,7 +73,7 @@ async function executeTrade({ symbol, action, entry, stop_loss, take_profit, com
     throw new Error(`Price ${midPrice.toFixed(5)} too far from entry ${entry} (${(proximityPct * 100).toFixed(3)}%)`);
   }
 
-  // 4. Position sizing
+  // 4. Position sizing (1% risk per trade)
   const riskAmount      = balance * RISK_PER_TRADE_PCT;
   const slDistance      = Math.abs(entry - stop_loss);
   const isJPY           = instrument.includes('JPY');
@@ -113,13 +115,28 @@ async function executeTrade({ symbol, action, entry, stop_loss, take_profit, com
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// POLLER: Check Pending TradeSetups every 5 minutes via Base44 functions
+// POLLER: Check Pending TradeSetups, respect MAX_CONCURRENT_TRADES = 2
 // ─────────────────────────────────────────────────────────────────────────────
 async function pollTradeSetups() {
-  console.log(`🔍 [Poller] Checking for Pending trade setups... ${new Date().toISOString()}`);
+  console.log(`🔍 [Poller] Checking trade setups... ${new Date().toISOString()}`);
 
   try {
-    // 1. Fetch all Pending setups via Base44 backend function
+    // 1. Check how many trades are already open on OANDA
+    const openTradesRes = await axios.get(
+      `${OANDA_BASE}/accounts/${OANDA_ACCOUNT_ID}/openTrades`,
+      { headers: { Authorization: `Bearer ${OANDA_API_KEY}` } }
+    );
+    const openCount = openTradesRes.data.trades.length;
+    const slotsAvailable = MAX_CONCURRENT_TRADES - openCount;
+
+    console.log(`📊 [Poller] Open trades: ${openCount}/${MAX_CONCURRENT_TRADES} | Slots available: ${slotsAvailable}`);
+
+    if (slotsAvailable <= 0) {
+      console.log('🔍 [Poller] Max concurrent trades reached. Skipping.');
+      return;
+    }
+
+    // 2. Fetch Pending setups from Base44
     const b44Res = await axios.get(BASE44_GET_TRADES_URL, {
       headers: { 'x-api-key': BASE44_SERVICE_TOKEN }
     });
@@ -130,10 +147,15 @@ async function pollTradeSetups() {
       return;
     }
 
-    console.log(`🔍 [Poller] Found ${setups.length} pending setup(s).`);
+    // Sort by confidence score descending — best setups first
+    const sorted = setups
+      .filter(s => s.confidence_score)
+      .sort((a, b) => (b.confidence_score || 0) - (a.confidence_score || 0));
 
-    // 2. Get current prices for all needed instruments
-    const symbols = [...new Set(setups.map(s => {
+    console.log(`🔍 [Poller] ${sorted.length} pending setup(s) sorted by confidence.`);
+
+    // 3. Get current prices
+    const symbols = [...new Set(sorted.map(s => {
       const raw = (s.pair || '').replace('/', '').toUpperCase();
       return INSTRUMENT_MAP[raw];
     }).filter(Boolean))];
@@ -151,8 +173,11 @@ async function pollTradeSetups() {
       priceMap[p.instrument] = mid;
     }
 
-    // 3. Check each setup
-    for (const setup of setups) {
+    // 4. Work through setups — fire up to `slotsAvailable` trades
+    let fired = 0;
+    for (const setup of sorted) {
+      if (fired >= slotsAvailable) break;
+
       const rawSymbol  = (setup.pair || '').replace('/', '').toUpperCase();
       const instrument = INSTRUMENT_MAP[rawSymbol];
       if (!instrument) continue;
@@ -163,14 +188,13 @@ async function pollTradeSetups() {
       const entry     = parseFloat(setup.entry);
       const proximity = Math.abs(currentPrice - entry) / entry;
 
-      console.log(`📊 [Poller] ${rawSymbol} | Current: ${currentPrice.toFixed(5)} | Entry: ${entry} | Distance: ${(proximity * 100).toFixed(3)}%`);
+      console.log(`📊 [Poller] ${rawSymbol} | Score: ${setup.confidence_score} | Price: ${currentPrice.toFixed(5)} | Entry: ${entry} | Distance: ${(proximity * 100).toFixed(3)}%`);
 
-      // Trigger if within 0.20% of entry
       if (proximity <= 0.0020) {
-        console.log(`🎯 [Poller] ${rawSymbol} entry triggered! Executing trade...`);
+        console.log(`🎯 [Poller] ${rawSymbol} entry triggered! (${fired + 1} of ${slotsAvailable} slots)`);
 
         try {
-          // Mark as Triggered first to prevent double-firing
+          // Mark Triggered to prevent double-fire
           await axios.post(BASE44_UPDATE_TRADE_URL,
             { id: setup.id, status: 'Triggered' },
             { headers: { 'x-api-key': BASE44_SERVICE_TOKEN, 'Content-Type': 'application/json' } }
@@ -185,7 +209,6 @@ async function pollTradeSetups() {
             comment:     `TraderJoe Auto | ${rawSymbol} ${setup.action}`
           });
 
-          // Update record with trade ID and Filled status
           await axios.post(BASE44_UPDATE_TRADE_URL,
             {
               id:             setup.id,
@@ -197,10 +220,10 @@ async function pollTradeSetups() {
           );
 
           console.log(`✅ [Poller] Trade filled for ${rawSymbol}. OANDA ID: ${result.tradeId}`);
+          fired++;
 
         } catch (execErr) {
-          console.error(`❌ [Poller] Trade execution failed for ${rawSymbol}:`, execErr.message);
-          // Revert to Pending so it can retry
+          console.error(`❌ [Poller] Execution failed for ${rawSymbol}:`, execErr.message);
           await axios.post(BASE44_UPDATE_TRADE_URL,
             { id: setup.id, status: 'Pending', notes: (setup.notes || '') + ` | Exec failed: ${execErr.message}` },
             { headers: { 'x-api-key': BASE44_SERVICE_TOKEN, 'Content-Type': 'application/json' } }
@@ -209,13 +232,15 @@ async function pollTradeSetups() {
       }
     }
 
+    if (fired === 0) console.log('🔍 [Poller] No setups close enough to entry. Waiting...');
+
   } catch (err) {
     console.error('❌ [Poller] Error:', err.message);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// WEBHOOK endpoint (kept for manual use if needed)
+// WEBHOOK endpoint (manual use)
 // ─────────────────────────────────────────────────────────────────────────────
 app.post('/webhook', async (req, res) => {
   const payload = req.body;
@@ -288,7 +313,7 @@ app.get('/status', async (req, res) => {
 // ── Start server + poller ─────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Trader Joe running on port ${PORT}`);
+  console.log(`🚀 Trader Joe running on port ${PORT} | Max concurrent trades: ${MAX_CONCURRENT_TRADES}`);
   pollTradeSetups();
   setInterval(pollTradeSetups, POLL_INTERVAL_MS);
   console.log(`⏱️  Auto-poller active — checking every 5 minutes`);
