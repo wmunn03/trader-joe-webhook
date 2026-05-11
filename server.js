@@ -18,7 +18,7 @@ const BASE44_SERVICE_TOKEN = process.env.BASE44_SERVICE_TOKEN;
 const BASE44_GET_TRADES_URL   = 'https://trader-joe-4634b4f9.base44.app/functions/getPendingTrades';
 const BASE44_UPDATE_TRADE_URL = 'https://trader-joe-4634b4f9.base44.app/functions/updateTradeStatus';
 
-const OANDA_BASE            = 'https://api-oanda.com/v3';
+const OANDA_BASE            = 'https://api-fxtrade.oanda.com/v3';
 const POLL_INTERVAL_MS      = 5 * 60 * 1000;
 const MAX_CONCURRENT_TRADES = 2;
 const RISK_PER_TRADE_PCT    = 0.01;
