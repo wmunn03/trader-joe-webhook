@@ -279,9 +279,9 @@ async function pollTradeSetups() {
           console.log('[Poller] Filled ' + rawSymbol + '. OANDA ID: ' + result.tradeId);
           fired++;
         } catch (execErr) {
-          console.error('[Poller] Failed ' + rawSymbol + ':', [execErr.me](https://execErr.me)ssage);
+          console.error('[Poller] Failed ' + rawSymbol + ':', execErr.message);
           await axios.post(BASE44_UPDATE_TRADE_URL,
-            { id: setup.id, status: 'Pending', notes: (setup.notes || '') + ' | Failed: ' + [execErr.me](https://execErr.me)ssage },
+            { id: setup.id, status: 'Pending', notes: (setup.notes || '') + ' | Failed: ' + execErr.message },
             { headers: { 'x-api-key': BASE44_SERVICE_TOKEN, 'Content-Type': 'application/json' } }).catch(function() {});
         }
       }
@@ -300,7 +300,7 @@ app.post('/webhook', async (req, res) => {
   const entry      = payload.entry;
   const stop_loss  = payload.stop_loss;
   const take_profit = payload.take_profit;
-  const comment    = [payload.com](https://payload.com)ment;
+  const comment    = payload.comment;
   if (!symbol || !action || !entry || !stop_loss || !take_profit)
     return res.status(400).json({ error: 'Missing required fields' });
   try {
