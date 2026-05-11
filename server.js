@@ -200,8 +200,8 @@ app.post('/luxalgo', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('[LuxAlgo] Error:', [err.me](https://err.me)ssage);
-    return res.status(500).json({ error: 'LuxAlgo processing failed', detail: err.response ? err.response.data : [err.me](https://err.me)ssage });
+    console.error('[LuxAlgo] Error:', err.message);
+    return res.status(500).json({ error: 'LuxAlgo processing failed', detail: err.response ? err.response.data : err.message });
   }
 });
 
@@ -288,7 +288,7 @@ async function pollTradeSetups() {
     }
     if (fired === 0) console.log('[Poller] Nothing close enough to entry.');
   } catch (err) {
-    console.error('[Poller] Error:', [err.me](https://err.me)ssage);
+    console.error('[Poller] Error:', err.message);
   }
 }
 
@@ -309,7 +309,7 @@ app.post('/webhook', async (req, res) => {
       units: result.units, entry: result.fillPrice, stop_loss, take_profit,
       risk_amount: result.riskAmount.toFixed(2) });
   } catch (err) {
-    return res.status(500).json({ error: 'Execution failed', detail: err.response ? err.response.data : [err.me](https://err.me)ssage });
+    return res.status(500).json({ error: 'Execution failed', detail: err.response ? err.response.data : err.message });
   }
 });
 
@@ -327,7 +327,7 @@ app.post('/close-all', async (req, res) => {
     }
     return res.json({ status: 'all_closed', trades_closed: results.length, results });
   } catch (err) {
-    return res.status(500).json({ error: err.response ? err.response.data : [err.me](https://err.me)ssage });
+    return res.status(500).json({ error: err.response ? err.response.data : err.message });
   }
 });
 
@@ -347,7 +347,7 @@ app.get('/status', async (req, res) => {
       })
     });
   } catch (err) {
-    return res.status(500).json({ error: err.response ? err.response.data : [err.me](https://err.me)ssage });
+    return res.status(500).json({ error: err.response ? err.response.data : err.message });
   }
 });
 
